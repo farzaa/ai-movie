@@ -7,10 +7,31 @@ import numpy as np
 import requests
 import threading
 from dotenv import load_dotenv
-
+from elevenlabs import generate, play, set_api_key, voices
+import pygame
 
 load_dotenv()
 api_key = os.environ.get("OPENAI_API_KEY")
+set_api_key(os.environ.get("ELEVENLABS_API_KEY"))
+
+
+def play_music(track_path):
+    # Initialize pygame mixer
+    pygame.mixer.init()
+    # Load the music file
+    pygame.mixer.music.load(track_path)
+    pygame.mixer.music.set_volume(0.3)
+    # Play the music file indefinitely (the argument -1 means looping forever)
+    pygame.mixer.music.play(-1)
+    
+    # Keep the program running to play music
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)  # You can adjust the tick rate as needed
+
+# Process target function
+def music_process():
+    play_music("exit.mp3")  # Replace with your actual file path
+
 
 def pass_to_gpt4_vision(base64_image, script):
   headers = {
@@ -24,8 +45,11 @@ def pass_to_gpt4_vision(base64_image, script):
         {
           "role": "system",
           "content": """
-          You are the narrator of an artsy hero film. Narrate the characters as if you were narrating the main characters in an epic opening sequence.
-          Make it really noir and artsy, while really making the characters feel epic. Don't repeat yourself. Make it short, max one line 10-20 words. Build on top of the story as you tell it. Don't use the word image.
+          You are the narrator of an  hero film. The main character's name is Farza. The woman's name is Wendy. Call them by their name. Narrate the characters as if you were narrating the main characters in an epic opening sequence.
+          Make it really awesome, while really making the characters feel epic. Don't repeat yourself. Make it short, max one line 10-20 words. Build on top of the story as you tell it. Don't use the word image. 
+          As you narrate, pretend there is an epic Hans Zimmer song playing in the background.
+          Use words that are simply but poetic, a 4th grader should be able to understand it perfectly.
+          Build a back story for Farza as the hero of a world he's trying to save.
           """,
         },
       ]
@@ -39,13 +63,49 @@ def pass_to_gpt4_vision(base64_image, script):
   gpt_4_output = response.json()["choices"][0]["message"]["content"]
   return gpt_4_output
 
+def enhance_image_contrast_saturation(image):
+    # Convert to float to prevent clipping values
+    image = np.float32(image) / 255.0
+
+    # Adjust contrast (1.0-3.0)
+    contrast = 1.5
+    image = cv2.pow(image, contrast)
+
+    # Convert to HSV color space to adjust saturation
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # Adjust saturation (1.0-3.0)
+    saturation_scale = 1.15
+    hsv[:, :, 1] *= saturation_scale
+
+    # Convert back to BGR color space
+    enhanced_image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    # Clip the values and convert back to uint8
+    enhanced_image = np.clip(enhanced_image, 0, 1)
+    enhanced_image = (255 * enhanced_image).astype(np.uint8)
+
+    return enhanced_image
+
+
+def play_audio(text):
+    audio = generate(text, voice=os.environ.get("ELEVENLABS_VOICE_ID"))
+    unique_id = base64.urlsafe_b64encode(os.urandom(30)).decode("utf-8").rstrip("=")
+    dir_path = os.path.join("narration", unique_id)
+    os.makedirs(dir_path, exist_ok=True)
+    file_path = os.path.join(dir_path, "audio.wav")
+
+    with open(file_path, "wb") as f:
+        f.write(audio)
+
+    play(audio)
 
 def generate_new_line(base64_image):
   return [
     {
       "role": "user",
       "content": [
-        {"type": "text", "text": "Describe this scene"},
+        {"type": "text", "text": "Describe this scene like you're a narrator in a movie"},
         {
             "type": "image_url",
             "image_url": f"data:image/jpeg;base64,{base64_image}",
@@ -69,10 +129,12 @@ def resize_image(image, max_width=500):
 def add_subtitle(image, text="", max_line_length=40):
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 1
-    font_color = (255, 255, 255)  # White color
+    font_color = (255, 255, 255)  # White color for the main text
+    shadow_color = (0, 0, 0)  # Black color for the shadow
     line_type = 2
     margin = 10  # Margin for text from the bottom
     line_spacing = 30  # Space between lines
+    shadow_offset = 2  # Offset for shadow
 
     # Split text into multiple lines
     words = text.split()
@@ -95,19 +157,27 @@ def add_subtitle(image, text="", max_line_length=40):
         text_x = (image.shape[1] - text_size[0]) // 2
         text_y = start_y + i * line_spacing
 
-        cv2.putText(image, line, (text_x, text_y), font, font_scale, font_color, line_type)
+        # Draw shadow
+        cv2.putText(image, line, (text_x + shadow_offset, text_y + shadow_offset), 
+                    font, font_scale, shadow_color, line_type)
+
+        # Draw main text
+        cv2.putText(image, line, (text_x, text_y), 
+                    font, font_scale, font_color, line_type)
 
     return image
 
 
 def webcam_capture(queue):
     cap = cv2.VideoCapture(0)
-    subtitle_text = "Default subtitle"
+    subtitle_text = "---"
 
     if not cap.isOpened():
         print("Error: Webcam not accessible.")
         return
 
+    cv2.namedWindow('Webcam', cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty('Webcam', cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_AUTOSIZE)
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -116,7 +186,7 @@ def webcam_capture(queue):
         # Check if there is a new message in the queue
         if not queue.empty():
             subtitle_text = queue.get()
-
+        frame = enhance_image_contrast_saturation(frame)
         frame_with_subtitle = add_subtitle(frame, subtitle_text)
         cv2.imshow('Webcam', frame_with_subtitle)
 
@@ -154,8 +224,8 @@ def process_frames(queue):
   
         frame_count += 1
         queue.put(gpt_4_output)
-
-        time.sleep(5)  # Wait for 1 second
+        play_audio(gpt_4_output)
+        # time.sleep()  # Wait for 1 second
 
     cap.release()
 
@@ -163,12 +233,15 @@ def main():
     queue = Queue()
     webcam_process = Process(target=webcam_capture, args=(queue,))
     frames_process = Process(target=process_frames, args=(queue,))
+    music_proc = Process(target=music_process)
 
     webcam_process.start()
     frames_process.start()
+    music_proc.start()
 
     webcam_process.join()
     frames_process.join()
+    music_proc.join()
 
 if __name__ == "__main__":
     main()
