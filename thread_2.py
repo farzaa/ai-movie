@@ -230,11 +230,8 @@ def process_frames(queue):
     script = []
 
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
     cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Webcam", 600, 338)
+    cv2.resizeWindow("Webcam", 640, 480)
 
     while True:
         ret, frame = cap.read()
