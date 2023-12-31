@@ -10,7 +10,9 @@ import requests
 from dotenv import load_dotenv
 from elevenlabs import generate, play, set_api_key
 
-from frames import add_faces
+import face_recognition
+
+# from frames import add_faces
 
 load_dotenv()
 api_key = os.environ.get("OPENAI_API_KEY")
@@ -18,6 +20,8 @@ set_api_key(os.environ.get("ELEVENLABS_API_KEY"))
 
 CAPTURE_TIME_BUFFER = 5
 CAPTURE_EVERY_X_FRAMES = 30 * CAPTURE_TIME_BUFFER
+
+curr_subtitle = "--"
 
 def play_music(track_path):
     # Initialize pygame mixer
@@ -53,7 +57,9 @@ As you narrate, pretend there is an epic Hans Zimmer song playing in the backgro
 Use words that are simply but poetic, a 4th grader should be able to understand it perfectly.
 Build a back story for each of the characters as the heros of a world they're trying to save.
 
-if you their name beneath their face in the image, refer to the character by name.
+if you clearly see their name beneath their face, refer to the character by name.
+
+Do not invent names for characters.
           """.strip(),
             },
         ]
@@ -141,7 +147,7 @@ def resize_image(image, max_width=500):
     return resized_image
 
 
-def add_subtitle(image, frame_count, text="", max_line_length=40):
+def add_subtitle(image, frame_count, text="", max_line_length=30):
     countdown_seconds = CAPTURE_TIME_BUFFER - (frame_count % CAPTURE_EVERY_X_FRAMES) // 30  # Convert frame count to seconds
 
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -210,6 +216,8 @@ def narrator_process(queue):
         if not queue.empty():
             gpt_4_output = queue.get()
             play_audio(gpt_4_output)
+            queue.put("--")
+            time.sleep(2)
 
 
 def process_frames(queue):
@@ -222,8 +230,8 @@ def process_frames(queue):
     script = []
 
     cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Webcam", cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_AUTOSIZE)
-    curr_subtitle = "--"
+    cv2.resizeWindow("Webcam", 600, 338)
+
     while True:
         ret, frame = cap.read()
         original_frame = frame.copy()
@@ -233,6 +241,13 @@ def process_frames(queue):
             break
         
         frame = enhance_image_contrast_saturation(frame)
+
+        if not queue.empty():
+            in_queue = queue.get()
+            if in_queue == "--":
+                global curr_subtitle
+                curr_subtitle = "--"
+
         frame_with_subtitle = add_subtitle(frame, frame_count, curr_subtitle)
 
         frame_count += 1
@@ -240,9 +255,14 @@ def process_frames(queue):
         cv2.imshow("Webcam", frame_with_subtitle)
 
         if frame_count % CAPTURE_EVERY_X_FRAMES == 0:
+            face_locations = face_recognition.face_locations(original_frame)
+            if not face_locations:
+                print("no faces")
+                continue
+            
             print("----gpt-time----")
             resized_frame = resize_image(original_frame)
-            resized_frame = add_faces(resized_frame)
+            # resized_frame = add_faces(resized_frame)
             retval, buffer = cv2.imencode(".jpg", resized_frame)
             base64_image = base64.b64encode(buffer).decode("utf-8")
             gpt_4_output = pass_to_gpt4_vision(base64_image, script)
