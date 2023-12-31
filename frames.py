@@ -14,9 +14,6 @@ import numpy as np
 
 facemap = {
     "Farza": "./faces/farza.jpg",
-    "Sharif": "./faces/sharif.jpg",
-    "Jacob": "./faces/jacob.jpg",
-    "Wendy": "./faces/wendy.jpg",
 }
 
 known_face_encodings = []

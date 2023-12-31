@@ -1,6 +1,7 @@
 import base64
 import os
 from multiprocessing import Process, Queue
+import time
 
 import cv2
 import numpy as np
@@ -9,12 +10,14 @@ import requests
 from dotenv import load_dotenv
 from elevenlabs import generate, play, set_api_key
 
-# from frames import add_faces
+from frames import add_faces
 
 load_dotenv()
 api_key = os.environ.get("OPENAI_API_KEY")
 set_api_key(os.environ.get("ELEVENLABS_API_KEY"))
 
+CAPTURE_TIME_BUFFER = 5
+CAPTURE_EVERY_X_FRAMES = 30 * CAPTURE_TIME_BUFFER
 
 def play_music(track_path):
     # Initialize pygame mixer
@@ -44,11 +47,13 @@ def pass_to_gpt4_vision(base64_image, script):
             {
                 "role": "system",
                 "content": """
-You are the narrator of an  hero film. The name of each character is below their face. Narrate the characters as if you were narrating the main characters in an epic opening sequence. Be sure to call them by their names.
+You are the narrator of an  hero film. Narrate the characters as if you were narrating the main characters in an epic opening sequence.
 Make it really awesome, while really making the characters feel epic. Don't repeat yourself. Make it short, max one line 10-20 words. Build on top of the story as you tell it. Don't use the word image. 
 As you narrate, pretend there is an epic Hans Zimmer song playing in the background.
 Use words that are simply but poetic, a 4th grader should be able to understand it perfectly.
 Build a back story for each of the characters as the heros of a world they're trying to save.
+
+if you their name beneath their face in the image, refer to the character by name.
           """.strip(),
             },
         ]
@@ -136,7 +141,9 @@ def resize_image(image, max_width=500):
     return resized_image
 
 
-def add_subtitle(image, text="", max_line_length=40):
+def add_subtitle(image, frame_count, text="", max_line_length=40):
+    countdown_seconds = CAPTURE_TIME_BUFFER - (frame_count % CAPTURE_EVERY_X_FRAMES) // 30  # Convert frame count to seconds
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 1
     font_color = (255, 255, 255)  # White color for the main text
@@ -183,31 +190,72 @@ def add_subtitle(image, text="", max_line_length=40):
             image, line, (text_x, text_y), font, font_scale, font_color, line_type
         )
 
+    font_scale = 2
+    countdown_text = f"{countdown_seconds}"
+    text_size = cv2.getTextSize(countdown_text, font, font_scale, line_type)[0]
+    text_x = image.shape[1] - text_size[0] - margin  # Position to the right
+    text_y = margin + text_size[1]  # Position at the top
+
+    # Draw shadow for countdown
+    cv2.putText(image, countdown_text, (text_x + shadow_offset, text_y + shadow_offset), font, font_scale, shadow_color, line_type)
+
+    # Draw countdown text
+    cv2.putText(image, countdown_text, (text_x, text_y), font, font_scale, font_color, line_type)
+    
     return image
 
 
-def webcam_capture(queue):
-    cap = cv2.VideoCapture(0)
-    subtitle_text = "---"
+def narrator_process(queue):
+    while True:
+        if not queue.empty():
+            gpt_4_output = queue.get()
+            play_audio(gpt_4_output)
 
+
+def process_frames(queue):
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Error: Webcam not accessible.")
+        print("Error: Webcam not accessible in process_frames.")
         return
+
+    frame_count = 0
+    script = []
 
     cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Webcam", cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_AUTOSIZE)
+    curr_subtitle = "--"
     while True:
         ret, frame = cap.read()
+        original_frame = frame.copy()
         frame = cv2.flip(frame, 1)
+
         if not ret:
             break
-
-        # Check if there is a new message in the queue
-        if not queue.empty():
-            subtitle_text = queue.get()
+        
         frame = enhance_image_contrast_saturation(frame)
-        frame_with_subtitle = add_subtitle(frame, subtitle_text)
+        frame_with_subtitle = add_subtitle(frame, frame_count, curr_subtitle)
+
+        frame_count += 1
+        print(frame_count)
         cv2.imshow("Webcam", frame_with_subtitle)
+
+        if frame_count % CAPTURE_EVERY_X_FRAMES == 0:
+            print("----gpt-time----")
+            resized_frame = resize_image(original_frame)
+            resized_frame = add_faces(resized_frame)
+            retval, buffer = cv2.imencode(".jpg", resized_frame)
+            base64_image = base64.b64encode(buffer).decode("utf-8")
+            gpt_4_output = pass_to_gpt4_vision(base64_image, script)
+            script = script + [{"role": "assistant", "content": gpt_4_output}]
+            print(gpt_4_output)
+
+            filename = "frame.jpg"
+            cv2.imwrite(filename, resized_frame)
+
+            curr_subtitle = gpt_4_output
+
+            frame_count += 1
+            queue.put(gpt_4_output)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -216,56 +264,19 @@ def webcam_capture(queue):
     cv2.destroyAllWindows()
 
 
-def process_frames(queue):
-    cap = cv2.VideoCapture(0)
-
-    if not cap.isOpened():
-        print("Error: Webcam not accessible in process_frames.")
-        return
-
-    frame_count = 0
-    script = []
-    while True:
-        ret, frame = cap.read()
-        frame = cv2.flip(frame, 1)
-
-        # frame = add_faces(frame)
-
-        if not ret:
-            break
-        print("----capturing----")
-
-        filename = "frame.jpg"
-        cv2.imwrite(filename, frame)
-
-        resized_frame = resize_image(frame)
-        retval, buffer = cv2.imencode(".jpg", resized_frame)
-        base64_image = base64.b64encode(buffer).decode("utf-8")
-        gpt_4_output = pass_to_gpt4_vision(base64_image, script)
-        script = script + [{"role": "assistant", "content": gpt_4_output}]
-        print("script:", script)
-
-        frame_count += 1
-        queue.put(gpt_4_output)
-        play_audio(gpt_4_output)
-        # time.sleep()  # Wait for 1 second
-
-    cap.release()
-
-
 def main():
     queue = Queue()
-    webcam_process = Process(target=webcam_capture, args=(queue,))
     frames_process = Process(target=process_frames, args=(queue,))
     music_proc = Process(target=music_process)
+    narrator_proc = Process(target=narrator_process, args=(queue,))
 
-    webcam_process.start()
     frames_process.start()
     music_proc.start()
+    narrator_proc.start()
 
-    webcam_process.join()
     frames_process.join()
     music_proc.join()
+    narrator_proc.join()
 
 
 if __name__ == "__main__":
